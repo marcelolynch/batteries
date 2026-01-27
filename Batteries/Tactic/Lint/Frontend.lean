@@ -7,6 +7,7 @@ module
 
 public meta import Lean.Elab.Command
 public meta import Batteries.Tactic.Lint.Basic
+public meta import Std.Time.DateTime
 
 public meta section
 
@@ -100,8 +101,9 @@ This declaration is `macro_inline`, so it should have the same thunky behavior a
 @[macro_inline, expose]
 def traceLintCore (msg : String) (inIO : Bool) : CoreM Unit := do
   if inIO then
+    let t ← Std.Time.Timestamp.now
     if ← getBoolOption `trace.Batteries.Lint then
-      IO.println msg
+      IO.println s!"{t}: {msg}"
   else
     trace[Batteries.Lint] msg
 
@@ -131,11 +133,12 @@ def lintCore (decls : Array Name) (linters : Array NamedLinter)
       s!"Running linters:\n  {"\n  ".intercalate <| linters.map (s!"{·.name}") |>.toList}"
       inIO currentModule
 
-  let tasks : Array (NamedLinter × Array (Name × Task (Option MessageData))) ←
+  let tasks : Array (NamedLinter × Array (Name × Task (Std.Time.Duration × Option MessageData))) ←
     linters.mapM fun linter => do
+      let t_s ← Std.Time.Timestamp.now
       traceLint "(0/2) Starting..." inIO currentModule linter.name
       let decls ← decls.filterM (shouldBeLinted linter.name)
-      (linter, ·) <$> decls.mapM fun decl => (decl, ·) <$> do
+      ((linter, ·) <$> decls.mapM fun decl => (decl, ·) <$> (do
         BaseIO.asTask do
           let act : MetaM (Option MessageData) := withCurrHeartbeats do
             let result ← linter.test decl
@@ -143,21 +146,28 @@ def lintCore (decls : Array Name) (linters : Array NamedLinter)
               -- Ensure any trace messages are propagated to stdout
               printTraces
             return result
-          match ← act
+          let t_e := match (← Std.Time.Timestamp.now.toBaseIO) with
+            | Except.ok t => t
+            | Except.error _ =>
+              panic! s!"Failed to get end time"
+          let duration := t_e - t_s
+          let r ← match ← act
               |>.run' mkMetaContext -- We use the context used by `Command.liftTermElabM`
               |>.run' {options, fileName := "", fileMap := default} {env}
               |>.toBaseIO with
-          | Except.ok msg? => pure msg?
-          | Except.error err => pure m!"LINTER FAILED:\n{err.toMessageData}"
+          | Except.ok msg? => pure (duration, msg?)
+          | Except.error err => pure (duration, m!"LINTER FAILED:\n{err.toMessageData}")))
 
   let result ← tasks.mapM fun (linter, decls) => do
     traceLint "(1/2) Getting..." inIO currentModule linter.name
     let mut msgs : Std.HashMap Name MessageData := {}
+    let mut duration : Std.Time.Duration := 0
     for (declName, msg?) in decls do
-      if let some msg := msg?.get then
+      if let (d, some msg) := msg?.get then
         msgs := msgs.insert declName msg
+        duration := d
     traceLint
-      s!"(2/2) {if msgs.isEmpty then "Passed!" else
+      s!"(2/2) Took: {duration.toMilliseconds} ms {if msgs.isEmpty then "Passed!" else
         s!"Failed with {msgs.size} messages\
         {if inIO then ", but these may include declarations in `nolints.json`" else ""}."}"
       inIO currentModule linter.name
