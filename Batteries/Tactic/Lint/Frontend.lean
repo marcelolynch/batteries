@@ -7,6 +7,7 @@ module
 
 public meta import Lean.Elab.Command
 public meta import Batteries.Tactic.Lint.Basic
+public meta import Std.Time.DateTime
 
 public meta section
 
@@ -131,11 +132,12 @@ def lintCore (decls : Array Name) (linters : Array NamedLinter)
       s!"Running linters:\n  {"\n  ".intercalate <| linters.map (s!"{·.name}") |>.toList}"
       inIO currentModule
 
-  let tasks : Array (Task (NamedLinter × Array (Name × (Option MessageData)))) ←
+  let tasks : Array (NamedLinter × Std.Time.Timestamp × (Task (Std.Time.Timestamp × (Array (Name × (Option MessageData)))))) ←
     linters.mapM fun linter => do
-      traceLint "(0/2) Starting..." inIO currentModule linter.name
       let decls ← decls.filterM (shouldBeLinted linter.name)
-      BaseIO.asTask do
+      traceLint s!"(0/2) Starting ({decls.size} decls)..." inIO currentModule linter.name
+      let t_s ← Std.Time.Timestamp.now
+      (linter, t_s, ·) <$> BaseIO.asTask do
         let results ← decls.mapM fun decl => do
           let act : MetaM (Option MessageData) := withCurrHeartbeats do
             let result ← linter.test decl
@@ -149,17 +151,21 @@ def lintCore (decls : Array Name) (linters : Array NamedLinter)
               |>.toBaseIO with
           | Except.ok msg? => pure (decl, msg?)
           | Except.error err => pure (decl, m!"LINTER FAILED:\n{err.toMessageData}")
-        pure (linter, results)
+        let t_e := match (← Std.Time.Timestamp.now.toBaseIO) with
+          | Except.ok t => t
+          | Except.error _ => panic! "Failed to get timestamp"
+        pure (t_e, results)
 
-  let result ← tasks.mapM fun task => do
-    let (linter, decls) := task.get
+  let result ← tasks.mapM fun (linter, startTime, task) => do
     traceLint "(1/2) Getting..." inIO currentModule linter.name
+    let (finishTime, decls):= task.get
     let mut msgs : Std.HashMap Name MessageData := {}
     for (declName, msg?) in decls do
       if let some msg := msg? then
         msgs := msgs.insert declName msg
+    let duration := (finishTime - startTime).toMilliseconds
     traceLint
-      s!"(2/2) {if msgs.isEmpty then "Passed!" else
+      s!"(2/2) [Duration: {duration}ms] {if msgs.isEmpty then "Passed!" else
         s!"Failed with {msgs.size} messages\
         {if inIO then ", but these may include declarations in `nolints.json`" else ""}."}"
       inIO currentModule linter.name
