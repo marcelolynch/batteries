@@ -152,34 +152,28 @@ def lintCore (decls : Array Name) (linters : Array NamedLinter)
           | Except.error err => pure m!"LINTER FAILED:\n{err.toMessageData}"))
 
   -- Collect results from all tasks
-  for (_, task) in tasks do
-    let _ := task.get
+  let mut resultsPerLinter : Std.HashMap Name (Std.HashMap Name MessageData) := {}
+  for (decl, task) in tasks do
+    let t := task.get
+    for (linter, msg?) in t do
+      if let some msg := msg? then
+        if resultsPerLinter[linter.name]?.isNone then
+          resultsPerLinter := resultsPerLinter.insert linter.name {}
+        let linterResults := resultsPerLinter[linter.name]!
+        resultsPerLinter := resultsPerLinter.insert linter.name (linterResults.insert decl msg)
 
   traceLint "Completed linting!" inIO currentModule
 
-  -- TODO: Collect results properly
-  let results : Array (NamedLinter × Std.HashMap Name MessageData) :=
-    linters.map fun linter => (linter, {})
-
-  traceLint "Completed linting!" inIO currentModule
-  return results
-
-  /-
-  let result ← tasks.mapM fun (linter, decls) => do
-    traceLint "(1/2) Getting..." inIO currentModule linter.name
-    let mut msgs : Std.HashMap Name MessageData := {}
-    for (declName, msg?) in decls do
-      if let some msg := msg?.get then
-        msgs := msgs.insert declName msg
+  for linter in linters do
+    let linterResults := resultsPerLinter.getD linter.name {}
     traceLint
-      s!"(2/2) {if msgs.isEmpty then "Passed!" else
-        s!"Failed with {msgs.size} messages\
+      s!"(2/2) {if linterResults.isEmpty then "Passed!" else
+        s!"Failed with {linterResults.size} messages\
         {if inIO then ", but these may include declarations in `nolints.json`" else ""}."}"
       inIO currentModule linter.name
-    pure (linter, msgs)
-  -/
 
-
+  return linters.map fun linter =>
+    (linter, resultsPerLinter.getD linter.name {})
 
 /-- Sorts a map with declaration keys as names by line number. -/
 def sortResults (results : Std.HashMap Name α) : CoreM <| Array (Name × α) := do
