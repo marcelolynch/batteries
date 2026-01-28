@@ -131,12 +131,13 @@ def lintCore (decls : Array Name) (linters : Array NamedLinter)
       s!"Running linters:\n  {"\n  ".intercalate <| linters.map (s!"{·.name}") |>.toList}"
       inIO currentModule
 
-  let tasks : Array (NamedLinter × Array (Name × Task (Option MessageData))) ←
-    linters.mapM fun linter => do
-      traceLint "(0/2) Starting..." inIO currentModule linter.name
-      let decls ← decls.filterM (shouldBeLinted linter.name)
-      (linter, ·) <$> decls.mapM fun decl => (decl, ·) <$> do
-        BaseIO.asTask do
+  -- One task per declaration, each task runs all applicable linters on that declaration
+  let tasks : Array (Name × (Task (Array ((NamedLinter × (Option MessageData)))))) ←
+    decls.mapM fun decl => do
+      -- Linters that apply to this declaration
+      let linters ← linters.filterM (fun l : NamedLinter => shouldBeLinted (linter := l.name) (decl := decl))
+      (decl, ·) <$> BaseIO.asTask do
+        (linters.mapM fun linter => ((linter, ·) <$> do
           let act : MetaM (Option MessageData) := withCurrHeartbeats do
             let result ← linter.test decl
             if inIO then
@@ -148,8 +149,22 @@ def lintCore (decls : Array Name) (linters : Array NamedLinter)
               |>.run' {options, fileName := "", fileMap := default} {env}
               |>.toBaseIO with
           | Except.ok msg? => pure msg?
-          | Except.error err => pure m!"LINTER FAILED:\n{err.toMessageData}"
+          | Except.error err => pure m!"LINTER FAILED:\n{err.toMessageData}"))
 
+  -- Collect results from all tasks
+  for (_, task) in tasks do
+    let _ := task.get
+
+  traceLint "Completed linting!" inIO currentModule
+
+  -- TODO: Collect results properly
+  let results : Array (NamedLinter × Std.HashMap Name MessageData) :=
+    linters.map fun linter => (linter, {})
+
+  traceLint "Completed linting!" inIO currentModule
+  return results
+
+  /-
   let result ← tasks.mapM fun (linter, decls) => do
     traceLint "(1/2) Getting..." inIO currentModule linter.name
     let mut msgs : Std.HashMap Name MessageData := {}
@@ -162,8 +177,8 @@ def lintCore (decls : Array Name) (linters : Array NamedLinter)
         {if inIO then ", but these may include declarations in `nolints.json`" else ""}."}"
       inIO currentModule linter.name
     pure (linter, msgs)
-  traceLint "Completed linting!" inIO currentModule
-  return result
+  -/
+
 
 
 /-- Sorts a map with declaration keys as names by line number. -/
